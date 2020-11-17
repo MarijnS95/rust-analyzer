@@ -173,6 +173,17 @@ fn ssr_let_stmt_in_macro_match() {
 
 #[test]
 fn ssr_let_stmt_in_fn_match() {
+    // FIXME: Optional semicolon parsing works differently than the actually-optional trailing comma
+    // that is only to improve readability when adding new items to a match block, for example.
+    // The ; has a semantic meaning but is expected to be optional in the pattern for ergonomics
+    // (and for the stmt example above), as long as the replacement template follows.
+    // This turns out to be more complicated to do as it is part of the matched LET_STMT syntax node.
+    assert_matches("let $a = 10", "fn main() { let x = 10; x }", &["let x = 10;"]);
+    assert_matches("let $a = $b", "fn main() { let x = 10; x }", &["let x = 10;"]);
+}
+
+#[test]
+fn ssr_let_stmt_with_semi_in_fn_match() {
     assert_matches("let $a = 10;", "fn main() { let x = 10; x }", &["let x = 10;"]);
     assert_matches("let $a = $b;", "fn main() { let x = 10; x }", &["let x = 10;"]);
 }
@@ -185,9 +196,32 @@ fn ssr_block_expr_match() {
 
 #[test]
 fn ssr_let_stmt_replace() {
+    // Pattern and template without trailing semicolon
+    assert_ssr_transform(
+        "let $a = $b ==>> let $a = 11",
+        "fn main() { let x = 10; x }",
+        expect![["fn main() { let x = 11; x }"]],
+    );
+
     // Pattern and template with trailing semicolon
     assert_ssr_transform(
         "let $a = $b; ==>> let $a = 11;",
+        "fn main() { let x = 10; x }",
+        expect![["fn main() { let x = 11; x }"]],
+    );
+
+    // Trailing semicolon only in template
+    // FIXME: This should fail, the expected value must be `let x = 11;;`
+    assert_ssr_transform(
+        "let $a = $b ==>> let $a = 11;",
+        "fn main() { let x = 10; x }",
+        expect![["fn main() { let x = 11; x }"]],
+    );
+
+    // Trailing semicolon only in pattern
+    // FIXME: This should drop the semicolon
+    assert_ssr_transform(
+        "let $a = $b; ==>> let $a = 11",
         "fn main() { let x = 10; x }",
         expect![["fn main() { let x = 11; x }"]],
     );
@@ -198,6 +232,14 @@ fn ssr_let_stmt_replace_expr() {
     // Trailing semicolon should be dropped from the new expression
     assert_ssr_transform(
         "let $a = $b; ==>> $b",
+        "fn main() { let x = 10; }",
+        expect![["fn main() { 10 }"]],
+    );
+
+    // Trailing semicolon should _not_ be dropped from the new expression
+    // FIXME: Trailing semicolon is implicitly matched and dropped
+    assert_ssr_transform(
+        "let $a = $b ==>> $b",
         "fn main() { let x = 10; }",
         expect![["fn main() { 10 }"]],
     );
