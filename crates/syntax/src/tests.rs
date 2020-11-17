@@ -104,11 +104,7 @@ fn type_parser_tests() {
 
 #[test]
 fn stmt_parser_tests() {
-    fragment_parser_dir_test(
-        &["parser/fragments/stmt/ok"],
-        &["parser/fragments/stmt/err"],
-        crate::ast::Stmt::parse,
-    );
+    fragment_parser_dir_test(&["parser/fragments/stmt/ok"], &[], crate::ast::Stmt::parse);
 }
 
 #[test]
