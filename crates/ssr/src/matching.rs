@@ -307,6 +307,14 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
                 );
             }
             None => {
+                if code.kind() == SyntaxKind::SEMICOLON
+                    && code.parent().kind() == SyntaxKind::LET_STMT
+                {
+                    // If the pattern ends but the code still has a trailing semicolon, accept the match.
+                    // Allows to match `let x = y; ...` with `let $a = $b`.
+                    return Ok(());
+                }
+
                 fail_match!("Pattern exhausted, while code remains: `{}`", code.text());
             }
         }
