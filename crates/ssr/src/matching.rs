@@ -18,22 +18,22 @@ use test_utils::mark;
 // going to match, as indicated by the --debug-snippet flag, then populate the reason field.
 macro_rules! match_error {
     ($e:expr) => {{
-            MatchFailed {
+            TokenMatchFailed::Failed(MatchFailed {
                 reason: if recording_match_fail_reasons() {
                     Some(format!("{}", $e))
                 } else {
                     None
                 }
-            }
+            })
     }};
     ($fmt:expr, $($arg:tt)+) => {{
-        MatchFailed {
+        TokenMatchFailed::Failed(MatchFailed {
             reason: if recording_match_fail_reasons() {
                 Some(format!($fmt, $($arg)+))
             } else {
                 None
             }
-        }
+        })
     }};
 }
 
@@ -77,7 +77,7 @@ pub(crate) struct MatchFailureReason {
 }
 
 /// An "error" indicating that matching failed. Use the fail_match! macro to create and return this.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct MatchFailed {
     /// The reason why we failed to match. Only present when debug_active true in call to
     /// `get_match`.
@@ -108,6 +108,28 @@ struct Matcher<'db, 'sema> {
     rule: &'sema ResolvedRule,
 }
 
+#[derive(Debug)]
+enum TokenMatchFailed {
+    Failed(MatchFailed),
+    // Partial(FileRange),
+    EarlyStop(syntax::TextSize),
+}
+
+impl TokenMatchFailed {
+    fn extract_failure<T>(r: Result<T, Self>) -> Result<(), MatchFailed> {
+        match r {
+            Err(Self::Failed(f)) => Err(f),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl From<MatchFailed> for TokenMatchFailed {
+    fn from(f: MatchFailed) -> Self {
+        TokenMatchFailed::Failed(f)
+    }
+}
+
 /// Which phase of matching we're currently performing. We do two phases because most attempted
 /// matches will fail and it means we can defer more expensive checks to the second phase.
 enum Phase<'a> {
@@ -127,10 +149,27 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
     ) -> Result<Match, MatchFailed> {
         let match_state = Matcher { sema, restrict_range: restrict_range.clone(), rule };
         // First pass at matching, where we check that node types and idents match.
-        match_state.attempt_match_node(&mut Phase::First, &rule.pattern.node, code)?;
-        match_state.validate_range(&sema.original_range(code))?;
+        let matched_range =
+            match_state.attempt_match_node(&mut Phase::First, &rule.pattern.node, code);
+
+        dbg!(&matched_range, code);
+
+        let range = match matched_range {
+            Ok(()) => sema.original_range(code),
+            // Err(MatchFailed::Partial(r)) => r
+            Err(TokenMatchFailed::EarlyStop(end)) => {
+                let mut original_range = sema.original_range(code);
+                let text_range = original_range.range;
+                assert!(text_range.contains(end));
+                original_range.range = syntax::TextRange::new(text_range.start(), end);
+                original_range
+            }
+            Err(TokenMatchFailed::Failed(e)) => return Err(e),
+        };
+
+        match_state.validate_range(&range)?;
         let mut the_match = Match {
-            range: sema.original_range(code),
+            range,
             matched_node: code.clone(),
             placeholder_values: FxHashMap::default(),
             ignored_comments: Vec::new(),
@@ -140,14 +179,14 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         };
         // Second matching pass, where we record placeholder matches, ignored comments and maybe do
         // any other more expensive checks that we didn't want to do on the first pass.
-        match_state.attempt_match_node(
+        TokenMatchFailed::extract_failure(match_state.attempt_match_node(
             &mut Phase::Second(&mut the_match),
             &rule.pattern.node,
             code,
-        )?;
+        ))?;
         the_match.depth = sema.ancestors_with_macros(the_match.matched_node.clone()).count();
         if let Some(template) = &rule.template {
-            the_match.render_template_paths(template, sema)?;
+            TokenMatchFailed::extract_failure(the_match.render_template_paths(template, sema))?;
         }
         Ok(the_match)
     }
@@ -160,7 +199,14 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
             if restrict_range.file_id != range.file_id
                 || !restrict_range.range.contains_range(range.range)
             {
-                fail_match!("Node originated from a macro");
+                // fail_match!("Node originated from a macro");
+                return Err(MatchFailed {
+                    reason: if recording_match_fail_reasons() {
+                        Some("Node originated from a macro".to_owned())
+                    } else {
+                        None
+                    },
+                });
             }
         }
         Ok(())
@@ -171,14 +217,16 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern: &SyntaxNode,
         code: &SyntaxNode,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         // Handle placeholders.
         if let Some(placeholder) = self.get_placeholder_for_node(pattern) {
             for constraint in &placeholder.constraints {
                 self.check_constraint(constraint, code)?;
             }
             if let Phase::Second(matches_out) = phase {
-                let original_range = self.sema.original_range(code);
+                let mut original_range = self.sema.original_range(code);
+                original_range.range =
+                    original_range.range.intersect(matches_out.range.range).unwrap();
                 // We validated the range for the node when we started the match, so the placeholder
                 // probably can't fail range validation, but just to be safe...
                 self.validate_range(&original_range)?;
@@ -187,6 +235,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
                     PlaceholderMatch::new(Some(code), original_range),
                 );
             }
+            // Range not relevant here
             return Ok(());
         }
         // We allow a UFCS call to match a method call, provided they resolve to the same function.
@@ -224,7 +273,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern: &SyntaxNode,
         code: &SyntaxNode,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         self.attempt_match_sequences(
             phase,
             PatternIterator::new(pattern),
@@ -237,7 +286,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern_it: PatternIterator,
         mut code_it: SyntaxElementChildren,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         let mut pattern_it = pattern_it.peekable();
         loop {
             match phase.next_non_trivial(&mut code_it) {
@@ -266,7 +315,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern: &mut Peekable<PatternIterator>,
         code: &syntax::SyntaxToken,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         phase.record_ignored_comments(code);
         // Ignore whitespace and comments.
         if code.kind().is_trivia() {
@@ -308,11 +357,12 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
             }
             None => {
                 if code.kind() == SyntaxKind::SEMICOLON
-                    && code.parent().kind() == SyntaxKind::LET_STMT
-                {
                     // If the pattern ends but the code still has a trailing semicolon, accept the match.
                     // Allows to match `let x = y; ...` with `let $a = $b`.
-                    return Ok(());
+                    && code.parent().kind() == SyntaxKind::LET_STMT
+                {
+                    // Matched until _before_ the semicolon
+                    return Err(TokenMatchFailed::EarlyStop(code.text_range().start()));
                 }
 
                 fail_match!("Pattern exhausted, while code remains: `{}`", code.text());
@@ -325,7 +375,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         &self,
         constraint: &Constraint,
         code: &SyntaxNode,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         match constraint {
             Constraint::Kind(kind) => {
                 kind.matches(code)?;
@@ -346,7 +396,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern: &SyntaxNode,
         code: &SyntaxNode,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         if let Some(pattern_resolved) = self.rule.pattern.resolved_paths.get(pattern) {
             let pattern_path = ast::Path::cast(pattern.clone()).unwrap();
             let code_path = ast::Path::cast(code.clone()).unwrap();
@@ -386,7 +436,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern: Option<T>,
         code: Option<T>,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         match (pattern, code) {
             (Some(p), Some(c)) => self.attempt_match_node(phase, &p.syntax(), &c.syntax()),
             (None, None) => Ok(()),
@@ -404,7 +454,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern: &SyntaxNode,
         code: &SyntaxNode,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         // Build a map keyed by field name.
         let mut fields_by_name = FxHashMap::default();
         for child in code.children() {
@@ -454,7 +504,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern: &SyntaxNode,
         code: &syntax::SyntaxNode,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         let mut pattern = PatternIterator::new(pattern).peekable();
         let mut children = code.children_with_tokens();
         while let Some(child) = children.next() {
@@ -537,7 +587,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern_ufcs: &UfcsCallInfo,
         code: &ast::MethodCallExpr,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         use ast::ArgListOwner;
         let code_resolved_function = self
             .sema
@@ -587,7 +637,9 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         loop {
             match (pattern_args.next(), code_args.next()) {
                 (None, None) => return Ok(()),
-                (p, c) => self.attempt_match_opt(phase, p, c)?,
+                (p, c) => {
+                    let _ = self.attempt_match_opt(phase, p, c)?;
+                }
             }
         }
     }
@@ -597,7 +649,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         phase: &mut Phase,
         pattern_ufcs: &UfcsCallInfo,
         code: &ast::CallExpr,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         use ast::ArgListOwner;
         // Check that the first argument is the expected type.
         if let (Some(pattern_type), Some(expr)) = (
@@ -615,7 +667,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         &self,
         pattern_type: &hir::Type,
         expr: &ast::Expr,
-    ) -> Result<usize, MatchFailed> {
+    ) -> Result<usize, TokenMatchFailed> {
         use hir::HirDisplay;
         let code_type = self.sema.type_of_expr(&expr).ok_or_else(|| {
             match_error!("Failed to get receiver type for `{}`", expr.syntax().text())
@@ -650,7 +702,7 @@ impl Match {
         &mut self,
         template: &ResolvedPattern,
         sema: &Semantics<ide_db::RootDatabase>,
-    ) -> Result<(), MatchFailed> {
+    ) -> Result<(), TokenMatchFailed> {
         let module = sema
             .scope(&self.matched_node)
             .module()
@@ -735,7 +787,7 @@ impl PlaceholderMatch {
 }
 
 impl NodeKind {
-    fn matches(&self, node: &SyntaxNode) -> Result<(), MatchFailed> {
+    fn matches(&self, node: &SyntaxNode) -> Result<(), TokenMatchFailed> {
         let ok = match self {
             Self::Literal => {
                 mark::hit!(literal_constraint);
