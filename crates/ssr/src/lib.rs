@@ -327,8 +327,13 @@ impl SsrMatches {
 
 impl Match {
     pub fn matched_text(&self) -> String {
-        let range_inside_match = TextRange::up_to(self.range.range.len());
-        self.matched_node.text().slice(range_inside_match).to_string()
+        let text = self.matched_node.text();
+        if let Some(range_in_match) = self.range_in_match {
+            text.slice(range_in_match)
+        } else {
+            text
+        }
+        .to_string()
     }
 }
 

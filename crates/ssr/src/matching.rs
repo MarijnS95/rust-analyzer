@@ -11,7 +11,9 @@ use ide_db::base_db::FileRange;
 use rustc_hash::FxHashMap;
 use std::{cell::Cell, iter::Peekable};
 use syntax::ast::{AstNode, AstToken};
-use syntax::{ast, SyntaxElement, SyntaxElementChildren, SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{
+    ast, SyntaxElement, SyntaxElementChildren, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
+};
 use test_utils::mark;
 
 // Creates a match error. If we're currently attempting to match some code that we thought we were
@@ -46,6 +48,7 @@ macro_rules! fail_match {
 #[derive(Debug)]
 pub struct Match {
     pub(crate) range: FileRange,
+    pub(crate) range_in_match: Option<TextRange>,
     pub(crate) matched_node: SyntaxNode,
     pub(crate) placeholder_values: FxHashMap<Var, PlaceholderMatch>,
     pub(crate) ignored_comments: Vec<ast::Comment>,
@@ -154,15 +157,16 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
 
         dbg!(&matched_range, code);
 
-        let range = match matched_range {
-            Ok(()) => sema.original_range(code),
+        let (range, range_in_match) = match matched_range {
+            Ok(()) => (sema.original_range(code), None),
             // Err(MatchFailed::Partial(r)) => r
             Err(TokenMatchFailed::EarlyStop(end)) => {
                 let mut original_range = sema.original_range(code);
                 let text_range = original_range.range;
                 assert!(text_range.contains(end));
                 original_range.range = syntax::TextRange::new(text_range.start(), end);
-                original_range
+                let range_in_match = TextRange::up_to(original_range.range.len());
+                (original_range, Some(range_in_match))
             }
             Err(TokenMatchFailed::Failed(e)) => return Err(e),
         };
@@ -170,6 +174,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
         match_state.validate_range(&range)?;
         let mut the_match = Match {
             range,
+            range_in_match,
             matched_node: code.clone(),
             placeholder_values: FxHashMap::default(),
             ignored_comments: Vec::new(),
