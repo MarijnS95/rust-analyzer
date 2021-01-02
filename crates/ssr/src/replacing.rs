@@ -79,11 +79,6 @@ impl ReplacementRenderer<'_> {
         for node_or_token in node.children_with_tokens() {
             self.render_node_or_token(&node_or_token);
         }
-        if let Some(let_stmt) = ast::LetStmt::cast(node.clone()) {
-            if let_stmt.semicolon_token().is_none() {
-                self.out.push(';');
-            }
-        }
     }
 
     fn render_node_or_token(&mut self, node_or_token: &SyntaxElement) {
