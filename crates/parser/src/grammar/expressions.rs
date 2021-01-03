@@ -128,9 +128,7 @@ pub(super) fn stmt(p: &mut Parser, with_semi: StmtWithSemi) {
             }
             StmtWithSemi::No => {}
             StmtWithSemi::Optional => {
-                if p.at(T![;]) {
-                    p.eat(T![;]);
-                }
+                p.eat(T![;]);
             }
         }
 
@@ -164,9 +162,7 @@ pub(super) fn stmt(p: &mut Parser, with_semi: StmtWithSemi) {
             }
             StmtWithSemi::No => {}
             StmtWithSemi::Optional => {
-                if p.at(T![;]) {
-                    p.eat(T![;]);
-                }
+                p.eat(T![;]);
             }
         }
         m.complete(p, LET_STMT);

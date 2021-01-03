@@ -135,9 +135,7 @@ fn is_literal_pat_start(p: &Parser) -> bool {
 fn literal_pat(p: &mut Parser) -> CompletedMarker {
     assert!(is_literal_pat_start(p));
     let m = p.start();
-    if p.at(T![-]) {
-        p.bump(T![-]);
-    }
+    p.eat(T![-]);
     expressions::literal(p);
     m.complete(p, LITERAL_PAT)
 }
